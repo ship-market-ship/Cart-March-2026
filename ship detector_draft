@@ -1,0 +1,237 @@
+const SHIPPING_PATTERNS = [
+  'shipping', 'delivery', 'shippingpolicy', 'shipping-policy',
+  'shipping-and-returns', 'shipping-returns', 'shippingcoverage',
+  'fulfillment', 'dispatch', 'freight', 'postage', 'tracking',
+  'track-order', 'returns', 'refund',
+];
+
+const JUNK_PATTERNS = [
+  'blog', 'news', 'article', 'product', 'products',
+  'collection', 'category', 'catalog', 'privacy',
+  'legal', 'terms', 'cookies', 'careers', 'press', 'media'
+];
+
+function fetchPage(url) {
+  try {
+    const res = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+    const code = res.getResponseCode();
+    if (code >= 400) return null;
+    return res.getContentText();
+  } catch (e) {
+    return null;
+  }
+}
+
+function getDomain(url) {
+  const m = url.match(/^(https?:\/\/[^\/]+)/i);
+  return m ? m[1] : null;
+}
+
+function getRootDomain(url) {
+  const m = url.match(/https?:\/\/(?:.*?\.)?([\w-]+\.[\w.]+?)(?:\/|$)/i);
+  return m ? m[1] : null;
+}
+
+function getRootBaseName(url) {
+  const m = url.match(/https?:\/\/(?:.*?\.)?(\w[\w-]+)\.\w+(?:\/|$)/i);
+  return m ? m[1] : null;
+}
+
+function scoreUrl(url) {
+  if (!url || typeof url !== 'string') return -999;
+  const u = url.toLowerCase();
+  for (const junk of JUNK_PATTERNS) {
+    if (u.includes('/' + junk)) return -999;
+  }
+  let score = 0;
+  for (const pattern of SHIPPING_PATTERNS) {
+    if (u.includes(pattern)) {
+      score += u.includes('/' + pattern) ? 20 : 10;
+    }
+  }
+  return score;
+}
+
+function pageContainsShippingContent(html) {
+  if (!html) return false;
+  const title = (html.match(/<title[^>]*>(.*?)<\/title>/i) || [])[1] || '';
+  const headings = (html.match(/<h[1-4][^>]*>(.*?)<\/h[1-4]>/gi) || []).join(' ');
+  const body = html.replace(/<[^>]+>/g, ' ');
+  const text = (title.repeat(5) + ' ' + headings.repeat(3) + ' ' + body).toLowerCase();
+  const hits = [
+    'shipping', 'delivery', 'fulfillment', 'freight',
+    'postage', 'transit', 'carrier', 'tracking',
+    'free shipping', 'ships within', 'estimated delivery'
+  ].filter(kw => text.includes(kw));
+  return hits.length >= 1;
+}
+
+function extractLinks(html, domain, rootDomain) {
+  if (!html) return [];
+  const links = [];
+  const baseName = getRootBaseName('https://' + rootDomain);
+  const matches = html.matchAll(/href=["']([^"'#?]+)["']/gi);
+  for (const m of matches) {
+    let href = m[1].trim();
+    if (!href || href === '/') continue;
+    if (href.startsWith('http')) {
+      if (baseName && href.toLowerCase().includes(baseName.toLowerCase())) {
+        links.push(href);
+      }
+    } else if (href.startsWith('/')) {
+      links.push(domain + href);
+    }
+  }
+  return [...new Set(links)];
+}
+
+function getSitemapLinks(domain) {
+  let links = [];
+  const sitemapUrls = [];
+  const robots = fetchPage(domain + '/robots.txt');
+  if (robots) {
+    const matches = robots.matchAll(/Sitemap:\s*(https?:\/\/\S+)/gi);
+    for (const m of matches) sitemapUrls.push(m[1].trim());
+  }
+  if (sitemapUrls.length === 0) {
+    sitemapUrls.push(
+      domain + '/sitemap.xml',
+      domain + '/sitemap_index.xml',
+      domain + '/sitemap-index.xml'
+    );
+  }
+  for (const sitemapUrl of sitemapUrls) {
+    const xml = fetchPage(sitemapUrl);
+    if (!xml) continue;
+    const subSitemaps = [...xml.matchAll(/<loc>(https?:\/\/[^<]+sitemap[^<]+)<\/loc>/gi)];
+    if (subSitemaps.length > 0) {
+      for (const sub of subSitemaps.slice(0, 5)) {
+        const subXml = fetchPage(sub[1].trim());
+        if (subXml) {
+          const subLinks = [...subXml.matchAll(/<loc>(https?:\/\/[^<]+)<\/loc>/gi)];
+          links = links.concat(subLinks.map(m => m[1].trim()));
+        }
+      }
+    }
+    const allLinks = [...xml.matchAll(/<loc>(https?:\/\/[^<]+)<\/loc>/gi)];
+    links = links.concat(allLinks.map(m => m[1].trim()));
+    if (links.length > 0) break;
+  }
+  return [...new Set(links)];
+}
+
+function findBestShippingUrl(urlList) {
+  if (!urlList || urlList.length === 0) return null;
+  const scored = urlList
+    .map(url => ({ url, score: scoreUrl(url) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  if (scored.length === 0) return null;
+  for (const candidate of scored.slice(0, 5)) {
+    const html = fetchPage(candidate.url);
+    if (pageContainsShippingContent(html)) return candidate.url;
+  }
+  return scored[0].url;
+}
+
+function tryCommonShippingPaths(domain) {
+  const commonPaths = [
+    '/shipping', '/pages/shipping', '/shipping-policy',
+    '/pages/shipping-policy', '/shipping-and-returns',
+    '/pages/shipping-and-returns', '/shippingpolicy',
+    '/policies/shipping-policy', '/help/shipping',
+    '/support/shipping', '/delivery', '/pages/delivery',
+    '/fulfillment', '/returns', '/pages/returns',
+    '/refund-policy', '/pages/refund-policy',
+  ];
+  for (const path of commonPaths) {
+    const url = domain + path;
+    const html = fetchPage(url);
+    if (html && pageContainsShippingContent(html)) return url;
+  }
+  return null;
+}
+
+function scanRow(sheet, i) {
+  const url = sheet.getRange(i, 1).getValue();
+  if (!url) return;
+  sheet.getRange(i, 4).setValue('Checking...');
+  SpreadsheetApp.flush();
+  const domain = getDomain(url);
+  const rootDomain = getRootDomain(url);
+  if (!domain || !rootDomain) {
+    sheet.getRange(i, 4).setValue('Error: Invalid URL');
+    sheet.getRange(i, 5).setValue('');
+    return;
+  }
+  let bestUrl = null;
+  const sitemapLinks = getSitemapLinks(domain);
+  if (sitemapLinks.length > 0) bestUrl = findBestShippingUrl(sitemapLinks);
+  if (!bestUrl) {
+    const homepage = fetchPage(url);
+    if (homepage) {
+      const pageLinks = extractLinks(homepage, domain, rootDomain);
+      bestUrl = findBestShippingUrl(pageLinks);
+    }
+  }
+  if (!bestUrl) bestUrl = tryCommonShippingPaths(domain);
+  sheet.getRange(i, 4).setValue(bestUrl ? 'Yes' : 'No');
+  sheet.getRange(i, 5).setValue(bestUrl || '');
+}
+
+function runShippingScanFromRow(startRow) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  for (let i = startRow; i <= lastRow; i++) {
+    const stopFlag = PropertiesService.getScriptProperties().getProperty('STOP_SHIPPING_SCAN');
+    if (stopFlag === 'true') {
+      PropertiesService.getScriptProperties().deleteProperty('STOP_SHIPPING_SCAN');
+      SpreadsheetApp.getUi().alert('Scan stopped at row ' + i + '.');
+      return;
+    }
+    scanRow(sheet, i);
+    Utilities.sleep(300);
+  }
+  SpreadsheetApp.getUi().alert('Done! Shipping scan complete.');
+}
+
+function findShippingPages() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (!sheet.getRange(1, 4).getValue()) sheet.getRange(1, 4).setValue('Shipping Page');
+  if (!sheet.getRange(1, 5).getValue()) sheet.getRange(1, 5).setValue('Shipping Page URL');
+  runShippingScanFromRow(2);
+}
+
+function restartShippingFromSelectedRow() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const startRow = sheet.getActiveRange().getRow();
+  if (startRow < 2) {
+    SpreadsheetApp.getUi().alert('Please select a row to start from (row 2 or below).');
+    return;
+  }
+  const ui = SpreadsheetApp.getUi();
+  const confirm = ui.alert('Restart Scan', 'Start from row ' + startRow + '?', ui.ButtonSet.OK_CANCEL);
+  if (confirm !== ui.Button.OK) return;
+  PropertiesService.getScriptProperties().deleteProperty('STOP_SHIPPING_SCAN');
+  runShippingScanFromRow(startRow);
+}
+
+function stopShippingScan() {
+  PropertiesService.getScriptProperties().setProperty('STOP_SHIPPING_SCAN', 'true');
+  SpreadsheetApp.getUi().alert('Stop signal sent. Scan will halt after the current row.');
+}
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  var menu = ui.createMenu('Shipping Finder');
+  menu.addItem('Run Scan', 'findShippingPages');
+  menu.addItem('Restart from Selected Row', 'restartShippingFromSelectedRow');
+  menu.addItem('Stop Scan', 'stopShippingScan');
+  menu.addToUi();
+}
