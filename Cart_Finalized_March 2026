@@ -1,8 +1,34 @@
-function detectEcommerceCarts() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  const lastRow = sheet.getLastRow();
-  
-  const cartIndicators = [
+function fetchUrl(url) {
+  if (!url || typeof url !== "string" || url.trim() === "") {
+    throw new Error("Address unavailable");
+  }
+
+  const options = {
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36"
+    }
+  };
+
+  try {
+    return UrlFetchApp.fetch(url, options);
+  } catch (e) {
+    if (!url.includes("://www.")) {
+      try {
+        const wwwUrl = url.replace("://", "://www.");
+        return UrlFetchApp.fetch(wwwUrl, options);
+      } catch (e2) {
+        throw new Error("Address unavailable");
+      }
+    }
+    throw new Error("Address unavailable");
+  }
+}
+
+
+function getCartIndicators() {
+  return [
     /\/cart/i, /\/checkout/i, /\/basket/i, /\/shop/i, /\/store/i, /\/buy/i,
     /add.to.cart/i, /add_to_cart/i, /addtocart/i, /shopping.cart/i,
     /cart-icon/i, /cart-count/i, /cart-quantity/i, /data-cart/i,
@@ -11,8 +37,25 @@ function detectEcommerceCarts() {
     /wix.*store/i, /snipcart/i, /cartjs/i, /buy.now/i,
     /add.to.bag/i, /proceed.to.checkout/i,
   ];
+}
 
-  for (let i = 2; i <= lastRow; i++) {
+
+function detectPlatform(html) {
+  if (html.includes("shopify") || html.includes("cdn.shopify.com")) return "Shopify";
+  if (html.includes("woocommerce") || html.includes("wc-cart")) return "WooCommerce";
+  if (html.includes("magento") || html.includes("mage/")) return "Magento";
+  if (html.includes("bigcommerce")) return "BigCommerce";
+  if (html.includes("ecwid")) return "Ecwid";
+  return "";
+}
+
+
+function scanRows(startRow) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const cartIndicators = getCartIndicators();
+
+  for (let i = startRow; i <= lastRow; i++) {
     const url = sheet.getRange(i, 1).getValue();
     if (!url) continue;
 
@@ -27,59 +70,42 @@ function detectEcommerceCarts() {
     SpreadsheetApp.flush();
 
     try {
-      const response = UrlFetchApp.fetch(url, {
-        muteHttpExceptions: true,
-        followRedirects: true,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36"
-        }
-      });
-
+      const response = fetchUrl(url);
       const statusCode = response.getResponseCode();
+
+      if (statusCode === 403) {
+        sheet.getRange(i, 2).setValue("Error: Access denied");
+        sheet.getRange(i, 3).setValue("");
+        continue;
+      }
+
       if (statusCode !== 200) {
-        sheet.getRange(i, 2).setValue(`Error: HTTP ${statusCode}`);
+        sheet.getRange(i, 2).setValue("Error: Address unavailable");
         sheet.getRange(i, 3).setValue("");
         continue;
       }
 
       const html = response.getContentText().toLowerCase();
       const found = cartIndicators.some(pattern => pattern.test(html));
-
-      const hasShopify = html.includes("shopify") || html.includes("cdn.shopify.com");
-      const hasWooCommerce = html.includes("woocommerce") || html.includes("wc-cart");
-      const hasMagento = html.includes("magento") || html.includes("mage/");
-      const hasBigCommerce = html.includes("bigcommerce");
-      const hasEcwid = html.includes("ecwid");
-
-      let platform = "";
-      if (hasShopify) platform = "Shopify";
-      else if (hasWooCommerce) platform = "WooCommerce";
-      else if (hasMagento) platform = "Magento";
-      else if (hasBigCommerce) platform = "BigCommerce";
-      else if (hasEcwid) platform = "Ecwid";
+      const platform = detectPlatform(html);
 
       sheet.getRange(i, 2).setValue(found ? "Yes" : "No");
       sheet.getRange(i, 3).setValue(found ? platform : "");
 
     } catch (e) {
-      sheet.getRange(i, 2).setValue(`Error: ${e.message}`);
+      sheet.getRange(i, 2).setValue("Error: Address unavailable");
       sheet.getRange(i, 3).setValue("");
     }
 
     Utilities.sleep(500);
   }
 
-  SpreadsheetApp.getUi().alert("Done! Cart detection complete.");
+  SpreadsheetApp.getUi().alert("Done! Scan complete through row " + lastRow + ".");
 }
 
 
-function onOpen() {
-  var ui = SpreadsheetApp.getUi();
-  var menu = ui.createMenu("Cart Detector");
-  menu.addItem("Run Detection", "detectEcommerceCarts");
-  menu.addItem("Restart from Selected Row", "restartFromSelectedRow");
-  menu.addItem("Stop Scan", "stopScan");
-  menu.addToUi();
+function detectEcommerceCarts() {
+  scanRows(2);
 }
 
 
@@ -102,80 +128,21 @@ function restartFromSelectedRow() {
   if (response !== ui.Button.OK) return;
 
   PropertiesService.getScriptProperties().deleteProperty("STOP_SCAN");
-
-  const lastRow = sheet.getLastRow();
-  const cartIndicators = [
-    /\/cart/i, /\/checkout/i, /\/basket/i, /\/shop/i, /\/store/i, /\/buy/i,
-    /add.to.cart/i, /add_to_cart/i, /addtocart/i, /shopping.cart/i,
-    /cart-icon/i, /cart-count/i, /cart-quantity/i, /data-cart/i,
-    /class="cart/i, /id="cart/i, /shopify/i, /woocommerce/i,
-    /magento/i, /bigcommerce/i, /squarespace.*commerce/i, /ecwid/i,
-    /wix.*store/i, /snipcart/i, /cartjs/i, /buy.now/i,
-    /add.to.bag/i, /proceed.to.checkout/i,
-  ];
-
-  for (let i = startRow; i <= lastRow; i++) {
-    const url = sheet.getRange(i, 1).getValue();
-    if (!url) continue;
-
-    const stopFlag = PropertiesService.getScriptProperties().getProperty("STOP_SCAN");
-    if (stopFlag === "true") {
-      PropertiesService.getScriptProperties().deleteProperty("STOP_SCAN");
-      SpreadsheetApp.getUi().alert("Scan stopped at row " + i + ".");
-      return;
-    }
-
-    sheet.getRange(i, 2).setValue("Checking...");
-    SpreadsheetApp.flush();
-
-    try {
-      const response = UrlFetchApp.fetch(url, {
-        muteHttpExceptions: true,
-        followRedirects: true,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36"
-        }
-      });
-
-      const statusCode = response.getResponseCode();
-      if (statusCode !== 200) {
-        sheet.getRange(i, 2).setValue(`Error: HTTP ${statusCode}`);
-        sheet.getRange(i, 3).setValue("");
-        continue;
-      }
-
-      const html = response.getContentText().toLowerCase();
-      const found = cartIndicators.some(pattern => pattern.test(html));
-
-      const hasShopify = html.includes("shopify") || html.includes("cdn.shopify.com");
-      const hasWooCommerce = html.includes("woocommerce") || html.includes("wc-cart");
-      const hasMagento = html.includes("magento") || html.includes("mage/");
-      const hasBigCommerce = html.includes("bigcommerce");
-      const hasEcwid = html.includes("ecwid");
-
-      let platform = "";
-      if (hasShopify) platform = "Shopify";
-      else if (hasWooCommerce) platform = "WooCommerce";
-      else if (hasMagento) platform = "Magento";
-      else if (hasBigCommerce) platform = "BigCommerce";
-      else if (hasEcwid) platform = "Ecwid";
-
-      sheet.getRange(i, 2).setValue(found ? "Yes" : "No");
-      sheet.getRange(i, 3).setValue(found ? platform : "");
-
-    } catch (e) {
-      sheet.getRange(i, 2).setValue(`Error: ${e.message}`);
-      sheet.getRange(i, 3).setValue("");
-    }
-
-    Utilities.sleep(500);
-  }
-
-  SpreadsheetApp.getUi().alert("Done! Scan complete through row " + lastRow + ".");
+  scanRows(startRow);
 }
 
 
 function stopScan() {
   PropertiesService.getScriptProperties().setProperty("STOP_SCAN", "true");
   SpreadsheetApp.getUi().alert("Stop signal sent. The scan will halt after the current row finishes.");
+}
+
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  var menu = ui.createMenu("Cart Detector");
+  menu.addItem("Run Detection", "detectEcommerceCarts");
+  menu.addItem("Restart from Selected Row", "restartFromSelectedRow");
+  menu.addItem("Stop Scan", "stopScan");
+  menu.addToUi();
 }
